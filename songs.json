@@ -2,6 +2,11 @@
   {
     "id": 1,
     "title": "Song 1",
-    "source": "https://storage.googleapis.com/dein-bucket/song1.mp3"
+    "source": "https://storage.googleapis.com/DEIN-BUCKET/music/song1.mp3"
+  },
+  {
+    "id": 2,
+    "title": "Song 2",
+    "source": "https://storage.googleapis.com/DEIN-BUCKET/music/song2.mp3"
   }
 ]
