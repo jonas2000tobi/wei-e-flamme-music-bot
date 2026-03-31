@@ -1,29 +1,21 @@
 import os
 import json
 import asyncio
-from datetime import timedelta
 
 import discord
 from discord import app_commands
 from discord.ext import commands
 
-from google.cloud import storage
-
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
-GCS_BUCKET_NAME = os.getenv("GCS_BUCKET_NAME")
 GUILD_ID = os.getenv("DISCORD_GUILD_ID")  # optional für schnellere Command-Syncs beim Testen
 FFMPEG_PATH = os.getenv("FFMPEG_PATH", "ffmpeg")
 
 if not DISCORD_TOKEN:
     raise RuntimeError("DISCORD_TOKEN fehlt.")
-if not GCS_BUCKET_NAME:
-    raise RuntimeError("GCS_BUCKET_NAME fehlt.")
 
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
-
-storage_client = storage.Client()
 
 SONGS_FILE = "songs.json"
 
@@ -78,25 +70,7 @@ class MusicState:
 music_state = MusicState()
 
 
-def generate_signed_url(blob_name: str, expiration_minutes: int = 30) -> str:
-    """
-    Erzeugt eine zeitlich begrenzte Signed URL für ein Objekt in Google Cloud Storage.
-    """
-    bucket = storage_client.bucket(GCS_BUCKET_NAME)
-    blob = bucket.blob(blob_name)
-
-    url = blob.generate_signed_url(
-        version="v4",
-        expiration=timedelta(minutes=expiration_minutes),
-        method="GET",
-    )
-    return url
-
-
 async def ensure_voice(interaction: discord.Interaction):
-    """
-    Holt den Bot in den Voice-Channel des Users oder nutzt bestehenden VC.
-    """
     if not interaction.user or not isinstance(interaction.user, discord.Member):
         await interaction.response.send_message("Konnte deinen Voice-Status nicht prüfen.", ephemeral=True)
         return None
@@ -147,13 +121,13 @@ async def play_song(interaction: discord.Interaction, index: int):
         music_state.current_index = index
         music_state.last_text_channel = interaction.channel
 
-        signed_url = generate_signed_url(song["blob_name"])
+        song_url = song["source"]
 
         if voice_client.is_playing() or voice_client.is_paused():
             voice_client.stop()
 
         source = discord.FFmpegPCMAudio(
-            signed_url,
+            song_url,
             executable=FFMPEG_PATH,
             before_options="-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
             options="-vn"
