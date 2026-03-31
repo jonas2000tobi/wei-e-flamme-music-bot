@@ -1,11 +1,8 @@
 import os
 import json
 import asyncio
-
-import discord
-from discord import app_commands
-from discord.ext import commands
-
+import disnake
+from disnake.ext import commands
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 GUILD_ID = os.getenv("DISCORD_GUILD_ID")
@@ -14,16 +11,15 @@ FFMPEG_PATH = os.getenv("FFMPEG_PATH", "ffmpeg")
 if not DISCORD_TOKEN:
     raise RuntimeError("DISCORD_TOKEN fehlt.")
 
-intents = discord.Intents.default()
-bot = commands.Bot(command_prefix="!", intents=intents)
-
+intents = disnake.Intents.default()
+bot = commands.InteractionBot(intents=intents)
 SONGS_FILE = "songs.json"
 
 
 def load_songs():
     with open(SONGS_FILE, "r", encoding="utf-8") as f:
-        loaded_songs = json.load(f)
-    return sorted(loaded_songs, key=lambda x: x["id"])
+        loaded = json.load(f)
+    return sorted(loaded, key=lambda x: x["id"])
 
 
 songs = load_songs()
@@ -48,62 +44,51 @@ class MusicState:
         next_index = (self.current_index + 1) % len(songs)
         return next_index, songs[next_index]
 
-    def get_previous_song(self):
-        if not songs:
-            return None, None
-        if self.current_index is None:
-            return 0, songs[0]
-        prev_index = (self.current_index - 1) % len(songs)
-        return prev_index, songs[prev_index]
-
 
 music_state = MusicState()
 
 
-# 🔥 WICHTIG: stabiler Voice Join
-async def ensure_voice(interaction: discord.Interaction):
-    if not interaction.user or not isinstance(interaction.user, discord.Member):
+async def ensure_voice(inter: disnake.AppCmdInter):
+    if not isinstance(inter.author, disnake.Member):
         return None
 
-    voice_state = interaction.user.voice
-    if voice_state is None or voice_state.channel is None:
+    if not inter.author.voice or not inter.author.voice.channel:
         return None
 
-    guild = interaction.guild
+    guild = inter.guild
     if guild is None:
         return None
 
-    target_channel = voice_state.channel
+    target_channel = inter.author.voice.channel
     voice_client = guild.voice_client
 
     try:
         if voice_client is None:
-            voice_client = await target_channel.connect(timeout=15.0, reconnect=False)
+            voice_client = await target_channel.connect()
         elif voice_client.channel != target_channel:
             await voice_client.move_to(target_channel)
-
         return voice_client
     except Exception as e:
         print(f"VOICE JOIN FEHLER: {e}")
         return None
 
 
-async def play_song(interaction: discord.Interaction, index: int):
+async def play_song(inter: disnake.AppCmdInter, index: int):
     async with music_state.lock:
-        guild = interaction.guild
+        guild = inter.guild
         if guild is None:
-            await interaction.followup.send("Das geht nur auf einem Server.")
+            await inter.edit_original_response("Das geht nur auf einem Server.")
             return
 
         voice_client = guild.voice_client
         if voice_client is None:
-            voice_client = await ensure_voice(interaction)
+            voice_client = await ensure_voice(inter)
             if voice_client is None:
-                await interaction.followup.send("Konnte Voice-Channel nicht betreten.")
+                await inter.edit_original_response("Konnte Voice-Channel nicht betreten.")
                 return
 
         if index < 0 or index >= len(songs):
-            await interaction.followup.send("Ungültiger Song.")
+            await inter.edit_original_response("Ungültiger Song.")
             return
 
         song = songs[index]
@@ -113,16 +98,15 @@ async def play_song(interaction: discord.Interaction, index: int):
         if voice_client.is_playing() or voice_client.is_paused():
             voice_client.stop()
 
-        source = discord.FFmpegPCMAudio(
+        audio_source = disnake.FFmpegPCMAudio(
             song_url,
             executable=FFMPEG_PATH,
             before_options="-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
             options="-vn",
         )
 
-        voice_client.play(source)
-
-        await interaction.followup.send(
+        voice_client.play(audio_source)
+        await inter.edit_original_response(
             f"▶️ Spiele jetzt **#{song['id']} – {song['title']}**"
         )
 
@@ -130,85 +114,70 @@ async def play_song(interaction: discord.Interaction, index: int):
 @bot.event
 async def on_ready():
     print(f"Eingeloggt als {bot.user}")
-
     try:
         if GUILD_ID:
-            guild_obj = discord.Object(id=int(GUILD_ID))
-            bot.tree.copy_global_to(guild=guild_obj)
-            synced = await bot.tree.sync(guild=guild_obj)
+            guild_obj = disnake.Object(id=int(GUILD_ID))
+            synced = await bot.sync_commands(test_guilds=[guild_obj.id])
             print(f"Guild-Sync fertig: {len(synced)} Commands")
         else:
-            synced = await bot.tree.sync()
+            synced = await bot.sync_commands()
             print(f"Global-Sync fertig: {len(synced)} Commands")
     except Exception as e:
         print(f"Sync-Fehler: {e}")
 
 
-# 🔥 FIX: defer damit Discord nicht abkackt
-@bot.tree.command(name="join", description="Bot joint deinen Voice-Channel.")
-async def join(interaction: discord.Interaction):
-    await interaction.response.defer()
-
-    voice_client = await ensure_voice(interaction)
-
+@bot.slash_command(description="Bot joint deinen Voice-Channel.")
+async def join(inter: disnake.AppCmdInter):
+    await inter.response.defer()
+    voice_client = await ensure_voice(inter)
     if voice_client is None:
-        await interaction.followup.send("❌ Konnte nicht joinen.")
+        await inter.edit_original_response("❌ Konnte nicht joinen.")
         return
+    await inter.edit_original_response(f"🔊 Joined **{voice_client.channel.name}**")
 
-    await interaction.followup.send(f"🔊 Joined **{voice_client.channel.name}**")
 
-
-@bot.tree.command(name="leave", description="Bot verlässt Voice.")
-async def leave(interaction: discord.Interaction):
-    await interaction.response.defer()
-
-    guild = interaction.guild
+@bot.slash_command(description="Bot verlässt Voice.")
+async def leave(inter: disnake.AppCmdInter):
+    await inter.response.defer()
+    guild = inter.guild
     if guild is None or guild.voice_client is None:
-        await interaction.followup.send("Ich bin nicht im Voice.")
+        await inter.edit_original_response("Ich bin nicht im Voice.")
         return
 
     await guild.voice_client.disconnect()
-    await interaction.followup.send("👋 Verlassen")
+    await inter.edit_original_response("👋 Verlassen")
 
 
-@bot.tree.command(name="playlist", description="Zeigt Songs.")
-async def playlist(interaction: discord.Interaction):
-    lines = [f"{s['id']} – {s['title']}" for s in songs]
-    await interaction.response.send_message("\n".join(lines))
-
-
-@bot.tree.command(name="play", description="Spielt Song.")
-async def play(interaction: discord.Interaction, number: int):
-    await interaction.response.defer()
-
-    index, song = music_state.get_song_by_number(number)
-    if song is None:
-        await interaction.followup.send("Song nicht gefunden.")
+@bot.slash_command(description="Zeigt Songs.")
+async def playlist(inter: disnake.AppCmdInter):
+    if not songs:
+        await inter.response.send_message("Playlist leer.")
         return
 
-    await play_song(interaction, index)
+    text = "\n".join([f"{s['id']} – {s['title']}" for s in songs])
+    await inter.response.send_message(text)
 
 
-@bot.tree.command(name="next", description="Next Song")
-async def next_song(interaction: discord.Interaction):
-    await interaction.response.defer()
+@bot.slash_command(description="Spielt Song nach Nummer.")
+async def play(inter: disnake.AppCmdInter, number: int):
+    await inter.response.defer()
+    index, song = music_state.get_song_by_number(number)
+    if song is None:
+        await inter.edit_original_response("Song nicht gefunden.")
+        return
+
+    await play_song(inter, index)
+
+
+@bot.slash_command(description="Nächster Song.")
+async def next(inter: disnake.AppCmdInter):
+    await inter.response.defer()
     index, song = music_state.get_next_song()
-    await play_song(interaction, index)
+    if song is None:
+        await inter.edit_original_response("Keine Songs vorhanden.")
+        return
 
-
-@bot.tree.command(name="prev", description="Previous Song")
-async def prev_song(interaction: discord.Interaction):
-    await interaction.response.defer()
-    index, song = music_state.get_previous_song()
-    await play_song(interaction, index)
-
-
-@bot.tree.command(name="stop", description="Stop")
-async def stop(interaction: discord.Interaction):
-    guild = interaction.guild
-    if guild and guild.voice_client:
-        guild.voice_client.stop()
-    await interaction.response.send_message("⏹️ Stop")
+    await play_song(inter, index)
 
 
 bot.run(DISCORD_TOKEN)
