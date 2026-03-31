@@ -60,62 +60,50 @@ class MusicState:
 music_state = MusicState()
 
 
+# 🔥 WICHTIG: stabiler Voice Join
 async def ensure_voice(interaction: discord.Interaction):
     if not interaction.user or not isinstance(interaction.user, discord.Member):
-        if not interaction.response.is_done():
-            await interaction.response.send_message(
-                "Konnte deinen Voice-Status nicht prüfen.", ephemeral=True
-            )
         return None
 
     voice_state = interaction.user.voice
     if voice_state is None or voice_state.channel is None:
-        if not interaction.response.is_done():
-            await interaction.response.send_message(
-                "Du bist in keinem Voice-Channel.", ephemeral=True
-            )
         return None
 
     guild = interaction.guild
     if guild is None:
-        if not interaction.response.is_done():
-            await interaction.response.send_message(
-                "Das geht nur auf einem Server.", ephemeral=True
-            )
         return None
 
     target_channel = voice_state.channel
     voice_client = guild.voice_client
 
-    if voice_client is None:
-        voice_client = await target_channel.connect()
-    elif voice_client.channel != target_channel:
-        await voice_client.move_to(target_channel)
+    try:
+        if voice_client is None:
+            voice_client = await target_channel.connect(timeout=15.0, reconnect=False)
+        elif voice_client.channel != target_channel:
+            await voice_client.move_to(target_channel)
 
-    return voice_client
+        return voice_client
+    except Exception as e:
+        print(f"VOICE JOIN FEHLER: {e}")
+        return None
 
 
 async def play_song(interaction: discord.Interaction, index: int):
     async with music_state.lock:
         guild = interaction.guild
         if guild is None:
-            if not interaction.response.is_done():
-                await interaction.response.send_message(
-                    "Das geht nur auf einem Server.", ephemeral=True
-                )
+            await interaction.followup.send("Das geht nur auf einem Server.")
             return
 
         voice_client = guild.voice_client
         if voice_client is None:
             voice_client = await ensure_voice(interaction)
             if voice_client is None:
+                await interaction.followup.send("Konnte Voice-Channel nicht betreten.")
                 return
 
         if index < 0 or index >= len(songs):
-            if not interaction.response.is_done():
-                await interaction.response.send_message(
-                    "Ungültiger Song-Index.", ephemeral=True
-                )
+            await interaction.followup.send("Ungültiger Song.")
             return
 
         song = songs[index]
@@ -132,17 +120,11 @@ async def play_song(interaction: discord.Interaction, index: int):
             options="-vn",
         )
 
-        def after_playback(error):
-            if error:
-                print(f"Playback-Fehler: {error}")
+        voice_client.play(source)
 
-        voice_client.play(source, after=after_playback)
-
-        msg = f"▶️ Spiele jetzt **#{song['id']} – {song['title']}**"
-        if interaction.response.is_done():
-            await interaction.followup.send(msg)
-        else:
-            await interaction.response.send_message(msg)
+        await interaction.followup.send(
+            f"▶️ Spiele jetzt **#{song['id']} – {song['title']}**"
+        )
 
 
 @bot.event
@@ -162,149 +144,71 @@ async def on_ready():
         print(f"Sync-Fehler: {e}")
 
 
-@bot.tree.command(name="join", description="Bot joint deinen aktuellen Voice-Channel.")
+# 🔥 FIX: defer damit Discord nicht abkackt
+@bot.tree.command(name="join", description="Bot joint deinen Voice-Channel.")
 async def join(interaction: discord.Interaction):
+    await interaction.response.defer()
+
     voice_client = await ensure_voice(interaction)
+
     if voice_client is None:
+        await interaction.followup.send("❌ Konnte nicht joinen.")
         return
 
-    await interaction.response.send_message(
-        f"🔊 Ich bin jetzt in **{voice_client.channel.name}**."
-    )
+    await interaction.followup.send(f"🔊 Joined **{voice_client.channel.name}**")
 
 
-@bot.tree.command(name="leave", description="Bot verlässt den Voice-Channel.")
+@bot.tree.command(name="leave", description="Bot verlässt Voice.")
 async def leave(interaction: discord.Interaction):
+    await interaction.response.defer()
+
     guild = interaction.guild
     if guild is None or guild.voice_client is None:
-        await interaction.response.send_message(
-            "Ich bin in keinem Voice-Channel.", ephemeral=True
-        )
+        await interaction.followup.send("Ich bin nicht im Voice.")
         return
 
     await guild.voice_client.disconnect()
-    await interaction.response.send_message("👋 Voice-Channel verlassen.")
+    await interaction.followup.send("👋 Verlassen")
 
 
-@bot.tree.command(name="playlist", description="Zeigt die komplette Musikliste.")
+@bot.tree.command(name="playlist", description="Zeigt Songs.")
 async def playlist(interaction: discord.Interaction):
-    if not songs:
-        await interaction.response.send_message("Die Playlist ist leer.", ephemeral=True)
-        return
-
-    lines = [f"**#{song['id']}** – {song['title']}" for song in songs]
-    text = "\n".join(lines)
-
-    if len(text) <= 1900:
-        await interaction.response.send_message(text)
-        return
-
-    chunks = []
-    current = ""
-    for line in lines:
-        if len(current) + len(line) + 1 > 1900:
-            chunks.append(current)
-            current = line
-        else:
-            current += ("\n" if current else "") + line
-    if current:
-        chunks.append(current)
-
-    await interaction.response.send_message(chunks[0])
-    for chunk in chunks[1:]:
-        await interaction.followup.send(chunk)
+    lines = [f"{s['id']} – {s['title']}" for s in songs]
+    await interaction.response.send_message("\n".join(lines))
 
 
-@bot.tree.command(name="play", description="Spielt einen Song nach Nummer ab.")
-@app_commands.describe(number="Songnummer aus der Playlist, z. B. 1 oder 2")
+@bot.tree.command(name="play", description="Spielt Song.")
 async def play(interaction: discord.Interaction, number: int):
+    await interaction.response.defer()
+
     index, song = music_state.get_song_by_number(number)
     if song is None:
-        await interaction.response.send_message(
-            "Songnummer nicht gefunden.", ephemeral=True
-        )
+        await interaction.followup.send("Song nicht gefunden.")
         return
 
     await play_song(interaction, index)
 
 
-@bot.tree.command(name="next", description="Spielt den nächsten Song.")
+@bot.tree.command(name="next", description="Next Song")
 async def next_song(interaction: discord.Interaction):
+    await interaction.response.defer()
     index, song = music_state.get_next_song()
-    if song is None:
-        await interaction.response.send_message(
-            "Keine Songs in der Liste.", ephemeral=True
-        )
-        return
-
     await play_song(interaction, index)
 
 
-@bot.tree.command(name="prev", description="Spielt den vorherigen Song.")
+@bot.tree.command(name="prev", description="Previous Song")
 async def prev_song(interaction: discord.Interaction):
+    await interaction.response.defer()
     index, song = music_state.get_previous_song()
-    if song is None:
-        await interaction.response.send_message(
-            "Keine Songs in der Liste.", ephemeral=True
-        )
-        return
-
     await play_song(interaction, index)
 
 
-@bot.tree.command(name="stop", description="Stoppt die Wiedergabe.")
+@bot.tree.command(name="stop", description="Stop")
 async def stop(interaction: discord.Interaction):
     guild = interaction.guild
-    if guild is None or guild.voice_client is None:
-        await interaction.response.send_message(
-            "Ich bin in keinem Voice-Channel.", ephemeral=True
-        )
-        return
-
-    vc = guild.voice_client
-    if vc.is_playing() or vc.is_paused():
-        vc.stop()
-        await interaction.response.send_message("⏹️ Wiedergabe gestoppt.")
-    else:
-        await interaction.response.send_message(
-            "Es läuft gerade nichts.", ephemeral=True
-        )
-
-
-@bot.tree.command(name="pause", description="Pausiert die Wiedergabe.")
-async def pause(interaction: discord.Interaction):
-    guild = interaction.guild
-    if guild is None or guild.voice_client is None:
-        await interaction.response.send_message(
-            "Ich bin in keinem Voice-Channel.", ephemeral=True
-        )
-        return
-
-    vc = guild.voice_client
-    if vc.is_playing():
-        vc.pause()
-        await interaction.response.send_message("⏸️ Pausiert.")
-    else:
-        await interaction.response.send_message(
-            "Es läuft gerade nichts.", ephemeral=True
-        )
-
-
-@bot.tree.command(name="resume", description="Setzt die Wiedergabe fort.")
-async def resume(interaction: discord.Interaction):
-    guild = interaction.guild
-    if guild is None or guild.voice_client is None:
-        await interaction.response.send_message(
-            "Ich bin in keinem Voice-Channel.", ephemeral=True
-        )
-        return
-
-    vc = guild.voice_client
-    if vc.is_paused():
-        vc.resume()
-        await interaction.response.send_message("▶️ Wiedergabe fortgesetzt.")
-    else:
-        await interaction.response.send_message("Es ist nichts pausiert.", ephemeral=True)
+    if guild and guild.voice_client:
+        guild.voice_client.stop()
+    await interaction.response.send_message("⏹️ Stop")
 
 
 bot.run(DISCORD_TOKEN)
