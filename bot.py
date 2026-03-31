@@ -1,6 +1,7 @@
 import os
 import json
 import asyncio
+import subprocess
 import disnake
 from disnake.ext import commands
 
@@ -13,6 +14,7 @@ if not DISCORD_TOKEN:
 
 intents = disnake.Intents.default()
 bot = commands.InteractionBot(intents=intents)
+
 SONGS_FILE = "songs.json"
 
 
@@ -93,19 +95,36 @@ async def play_song(inter: disnake.AppCmdInter, index: int):
 
         song = songs[index]
         music_state.current_index = index
-        song_url = song["source"]
+        song_path = song["source"]
+
+        print("===================================")
+        print(f"VERSUCHE SONG ZU SPIELEN: {song['title']}")
+        print(f"SONG PFAD: {song_path}")
+        print("DATEI EXISTIERT:", os.path.exists(song_path))
+        print("===================================")
+
+        if not os.path.exists(song_path):
+            await inter.edit_original_response(f"Datei nicht gefunden: {song_path}")
+            return
 
         if voice_client.is_playing() or voice_client.is_paused():
             voice_client.stop()
 
-        audio_source = disnake.FFmpegPCMAudio(
-            song_url,
+        source = disnake.FFmpegPCMAudio(
+            song_path,
             executable=FFMPEG_PATH,
-            before_options="-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
-            options="-vn",
+            options="-vn -loglevel error",
+            stderr=subprocess.PIPE
         )
 
-        voice_client.play(audio_source)
+        def after_playing(error):
+            if error:
+                print(f"PLAYBACK ERROR: {error}")
+            else:
+                print("SONG WURDE OHNE PYTHON-FEHLER BEENDET")
+
+        voice_client.play(source, after=after_playing)
+
         await inter.edit_original_response(
             f"▶️ Spiele jetzt **#{song['id']} – {song['title']}**"
         )
